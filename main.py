@@ -160,7 +160,7 @@ def fetch_papers() -> list[Paper]:
 # Phase 2: Summarize with Gemini API
 # ---------------------------------------------------------------------------
 def _summarize_one(client: genai.Client, paper: Paper) -> None:
-    """단일 논문을 Gemini로 요약하고 Paper 객체에 저장."""
+    """단일 논문을 Gemini로 요약하고 Paper 객체에 저장. 429시 재시도."""
     prompt = f"""다음 논문을 분석해주세요.
 
 제목: {paper.title}
@@ -181,26 +181,33 @@ def _summarize_one(client: genai.Client, paper: Paper) -> None:
 [관련성]
 (관련성 평가)"""
 
-    try:
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-        )
-        text = response.text
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+            )
+            text = response.text
 
-        # [요약]과 [관련성] 섹션 파싱
-        if "[요약]" in text and "[관련성]" in text:
-            parts = text.split("[관련성]")
-            paper.summary_ko = parts[0].replace("[요약]", "").strip()
-            paper.relevance = parts[1].strip()
-        else:
-            paper.summary_ko = text.strip()
-            paper.relevance = "(관련성 평가 없음)"
+            # [요약]과 [관련성] 섹션 파싱
+            if "[요약]" in text and "[관련성]" in text:
+                parts = text.split("[관련성]")
+                paper.summary_ko = parts[0].replace("[요약]", "").strip()
+                paper.relevance = parts[1].strip()
+            else:
+                paper.summary_ko = text.strip()
+                paper.relevance = "(관련성 평가 없음)"
+            return  # 성공
 
-    except Exception as e:
-        logger.warning(f"  Failed to summarize '{paper.title[:50]}': {e}")
-        paper.summary_ko = "(요약 생성 실패)"
-        paper.relevance = "(관련성 평가 실패)"
+        except Exception as e:
+            logger.warning(f"  Summarize attempt {attempt+1} failed for '{paper.title[:50]}': {e}")
+            if attempt < 2:
+                wait = 15 * (attempt + 1)  # 15초, 30초
+                logger.info(f"  Retrying in {wait}s...")
+                time.sleep(wait)
+
+    paper.summary_ko = "(요약 생성 실패)"
+    paper.relevance = "(관련성 평가 실패)"
 
 
 def summarize_papers(papers: list[Paper]) -> list[Paper]:
