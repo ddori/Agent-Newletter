@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-import google.generativeai as genai
+from google import genai
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -24,7 +24,7 @@ import google.generativeai as genai
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
-RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", GMAIL_ADDRESS)
+RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL") or GMAIL_ADDRESS
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
 KEYWORDS = [
@@ -123,30 +123,33 @@ def fetch_papers() -> list[Paper]:
         })
         url = f"{ARXIV_API_URL}?{params}"
 
-        try:
-            logger.info(f"Fetching arxiv: {keyword}")
-            req = urllib.request.Request(url, headers={"User-Agent": "AgentNewsletter/1.0"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = resp.read()
+        for attempt in range(3):
+            try:
+                logger.info(f"Fetching arxiv: {keyword} (attempt {attempt+1})")
+                req = urllib.request.Request(url, headers={"User-Agent": "AgentNewsletter/1.0"})
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    data = resp.read()
 
-            root = ET.fromstring(data)
-            entries = root.findall("atom:entry", ARXIV_NAMESPACE)
-            logger.info(f"  Found {len(entries)} entries for '{keyword}'")
+                root = ET.fromstring(data)
+                entries = root.findall("atom:entry", ARXIV_NAMESPACE)
+                logger.info(f"  Found {len(entries)} entries for '{keyword}'")
 
-            for entry in entries:
-                paper = _parse_arxiv_entry(entry)
-                if paper.published < cutoff_str:
-                    continue
-                # arxiv ID로 중복 제거
-                arxiv_id = paper.arxiv_url.rstrip("/").split("/")[-1]
-                if arxiv_id not in seen_ids:
-                    seen_ids[arxiv_id] = paper
+                for entry in entries:
+                    paper = _parse_arxiv_entry(entry)
+                    if paper.published < cutoff_str:
+                        continue
+                    arxiv_id = paper.arxiv_url.rstrip("/").split("/")[-1]
+                    if arxiv_id not in seen_ids:
+                        seen_ids[arxiv_id] = paper
 
-        except Exception as e:
-            logger.warning(f"  Failed to fetch '{keyword}': {e}")
+                break  # 성공하면 재시도 루프 탈출
+            except Exception as e:
+                logger.warning(f"  Failed to fetch '{keyword}' (attempt {attempt+1}): {e}")
+                if attempt < 2:
+                    time.sleep(5 * (attempt + 1))  # 5초, 10초 대기 후 재시도
 
-        # arxiv API rate limit: 3초 간격
-        time.sleep(3)
+        # arxiv API rate limit: 5초 간격
+        time.sleep(5)
 
     papers = list(seen_ids.values())
     logger.info(f"Total unique papers after dedup: {len(papers)}")
@@ -156,7 +159,7 @@ def fetch_papers() -> list[Paper]:
 # ---------------------------------------------------------------------------
 # Phase 2: Summarize with Gemini API
 # ---------------------------------------------------------------------------
-def _summarize_one(model: genai.GenerativeModel, paper: Paper) -> None:
+def _summarize_one(client: genai.Client, paper: Paper) -> None:
     """단일 논문을 Gemini로 요약하고 Paper 객체에 저장."""
     prompt = f"""다음 논문을 분석해주세요.
 
@@ -179,7 +182,10 @@ def _summarize_one(model: genai.GenerativeModel, paper: Paper) -> None:
 (관련성 평가)"""
 
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+        )
         text = response.text
 
         # [요약]과 [관련성] 섹션 파싱
@@ -202,11 +208,10 @@ def summarize_papers(papers: list[Paper]) -> list[Paper]:
     if not papers:
         return papers
 
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(GEMINI_MODEL)
+    client = genai.Client(api_key=GEMINI_API_KEY)
     for i, paper in enumerate(papers):
         logger.info(f"Summarizing [{i+1}/{len(papers)}]: {paper.title[:60]}")
-        _summarize_one(model, paper)
+        _summarize_one(client, paper)
 
     return papers
 
