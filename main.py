@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-from google import genai
+import json
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -26,6 +26,7 @@ GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL") or GMAIL_ADDRESS
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 KEYWORDS = [
     "self-healing agent",
@@ -159,8 +160,42 @@ def fetch_papers() -> list[Paper]:
 # ---------------------------------------------------------------------------
 # Phase 2: Summarize with Gemini API
 # ---------------------------------------------------------------------------
-def _summarize_one(client: genai.Client, paper: Paper) -> None:
-    """단일 논문을 Gemini로 요약하고 Paper 객체에 저장. 429시 재시도."""
+def _call_gemini(prompt: str) -> str:
+    """Gemini REST API 직접 호출. 429시 재시도."""
+    url = f"{GEMINI_API_URL}?key={GEMINI_API_KEY}"
+    body = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+    }).encode("utf-8")
+
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(
+                url,
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                result = json.loads(resp.read())
+            return result["candidates"][0]["content"]["parts"][0]["text"]
+
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="replace")
+            logger.warning(f"  Gemini attempt {attempt+1}: HTTP {e.code} - {error_body[:200]}")
+            if attempt < 2:
+                wait = 15 * (attempt + 1)
+                logger.info(f"  Retrying in {wait}s...")
+                time.sleep(wait)
+        except Exception as e:
+            logger.warning(f"  Gemini attempt {attempt+1}: {e}")
+            if attempt < 2:
+                time.sleep(15 * (attempt + 1))
+
+    return ""
+
+
+def _summarize_one(paper: Paper) -> None:
+    """단일 논문을 Gemini로 요약하고 Paper 객체에 저장."""
     prompt = f"""다음 논문을 분석해주세요.
 
 제목: {paper.title}
@@ -181,33 +216,19 @@ def _summarize_one(client: genai.Client, paper: Paper) -> None:
 [관련성]
 (관련성 평가)"""
 
-    for attempt in range(3):
-        try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-            )
-            text = response.text
+    text = _call_gemini(prompt)
+    if not text:
+        paper.summary_ko = "(요약 생성 실패)"
+        paper.relevance = "(관련성 평가 실패)"
+        return
 
-            # [요약]과 [관련성] 섹션 파싱
-            if "[요약]" in text and "[관련성]" in text:
-                parts = text.split("[관련성]")
-                paper.summary_ko = parts[0].replace("[요약]", "").strip()
-                paper.relevance = parts[1].strip()
-            else:
-                paper.summary_ko = text.strip()
-                paper.relevance = "(관련성 평가 없음)"
-            return  # 성공
-
-        except Exception as e:
-            logger.warning(f"  Summarize attempt {attempt+1} failed for '{paper.title[:50]}': {e}")
-            if attempt < 2:
-                wait = 15 * (attempt + 1)  # 15초, 30초
-                logger.info(f"  Retrying in {wait}s...")
-                time.sleep(wait)
-
-    paper.summary_ko = "(요약 생성 실패)"
-    paper.relevance = "(관련성 평가 실패)"
+    if "[요약]" in text and "[관련성]" in text:
+        parts = text.split("[관련성]")
+        paper.summary_ko = parts[0].replace("[요약]", "").strip()
+        paper.relevance = parts[1].strip()
+    else:
+        paper.summary_ko = text.strip()
+        paper.relevance = "(관련성 평가 없음)"
 
 
 def summarize_papers(papers: list[Paper]) -> list[Paper]:
@@ -215,10 +236,9 @@ def summarize_papers(papers: list[Paper]) -> list[Paper]:
     if not papers:
         return papers
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
     for i, paper in enumerate(papers):
         logger.info(f"Summarizing [{i+1}/{len(papers)}]: {paper.title[:60]}")
-        _summarize_one(client, paper)
+        _summarize_one(paper)
 
     return papers
 
