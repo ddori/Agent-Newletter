@@ -1,6 +1,6 @@
 """
 Self-Healing Agent Research Newsletter
-arxiv 논문 수집 → Claude API 요약 → Gmail 발송 자동화 파이프라인
+arxiv 논문 수집 → Gemini API 요약 → Gmail 발송 자동화 파이프라인
 """
 
 import os
@@ -16,16 +16,16 @@ from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-import anthropic
+import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", GMAIL_ADDRESS)
-CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
 KEYWORDS = [
     "self-healing agent",
@@ -154,10 +154,10 @@ def fetch_papers() -> list[Paper]:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: Summarize with Claude API
+# Phase 2: Summarize with Gemini API
 # ---------------------------------------------------------------------------
-def _summarize_one(client: anthropic.Anthropic, paper: Paper) -> None:
-    """단일 논문을 Claude로 요약하고 Paper 객체에 저장."""
+def _summarize_one(model: genai.GenerativeModel, paper: Paper) -> None:
+    """단일 논문을 Gemini로 요약하고 Paper 객체에 저장."""
     prompt = f"""다음 논문을 분석해주세요.
 
 제목: {paper.title}
@@ -179,12 +179,8 @@ def _summarize_one(client: anthropic.Anthropic, paper: Paper) -> None:
 (관련성 평가)"""
 
     try:
-        message = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = message.content[0].text
+        response = model.generate_content(prompt)
+        text = response.text
 
         # [요약]과 [관련성] 섹션 파싱
         if "[요약]" in text and "[관련성]" in text:
@@ -202,14 +198,15 @@ def _summarize_one(client: anthropic.Anthropic, paper: Paper) -> None:
 
 
 def summarize_papers(papers: list[Paper]) -> list[Paper]:
-    """모든 논문을 Claude API로 요약."""
+    """모든 논문을 Gemini API로 요약."""
     if not papers:
         return papers
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel(GEMINI_MODEL)
     for i, paper in enumerate(papers):
         logger.info(f"Summarizing [{i+1}/{len(papers)}]: {paper.title[:60]}")
-        _summarize_one(client, paper)
+        _summarize_one(model, paper)
 
     return papers
 
@@ -282,7 +279,7 @@ def format_newsletter(papers: list[Paper], date_str: str) -> str:
   <hr style="margin-top:30px; border:none; border-top:1px solid #eee;"/>
   <p style="font-size:11px; color:#999; text-align:center;">
     이 뉴스레터는 GitHub Actions에 의해 자동 생성되었습니다.<br/>
-    Powered by arXiv API + Claude API
+    Powered by arXiv API + Gemini API
   </p>
 </body>
 </html>"""
