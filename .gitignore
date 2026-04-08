@@ -6,3 +6,7 @@ dist/
 build/
 .venv/
 venv/
+logs/
+logdir/
+*.pt
+wandb/
